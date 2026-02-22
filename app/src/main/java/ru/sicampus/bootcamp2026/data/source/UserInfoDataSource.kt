@@ -26,129 +26,143 @@ data class MeetingDto(
 open class UserInfoDataSource {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
+    private fun HttpURLConnection.readResponseText(): String {
+        return try {
+            val code = responseCode
+            if (code in 200..299) {
+                inputStream.bufferedReader().use { it.readText() }
+            } else {
+                errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+            }
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    private fun prepareConnection(
+        url: URL,
+        method: String,
+        headers: Map<String, String> = emptyMap(),
+        connectTimeout: Int = 15000,
+        readTimeout: Int = 15000,
+        doOutput: Boolean = false
+    ): HttpURLConnection {
+        val conn = (url.openConnection() as HttpURLConnection)
+        conn.requestMethod = method
+        conn.doOutput = doOutput
+        conn.setRequestProperty("Accept", "application/json")
+        headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
+        conn.connectTimeout = connectTimeout
+        conn.readTimeout = readTimeout
+        return conn
+    }
+
+    private fun <T> performRequest(
+        url: URL,
+        method: String = "GET",
+        headers: Map<String, String> = emptyMap(),
+        body: String? = null,
+        connectTimeout: Int = 15000,
+        readTimeout: Int = 15000,
+        expectCodeRange: IntRange = 200..299,
+        parse: (String) -> T
+    ): T {
+        val conn = prepareConnection(url, method, headers, connectTimeout, readTimeout, body != null)
+
+        if (body != null) {
+            conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+        }
+
+        val code = conn.responseCode
+        val text = conn.readResponseText()
+        conn.disconnect()
+
+        if (code !in expectCodeRange) error("HTTP $code: $text")
+
+        return parse(text)
+    }
+
     open suspend fun login(username: String, password: String): Result<UserDto> =
         withContext(Dispatchers.IO) {
             runCatching {
                 val url = URL(Network.HOST + "/api/person/login")
 
-                val conn = url.openConnection() as HttpURLConnection
                 val auth = "$username:$password"
-                val encoded = android.util.Base64.encodeToString(
-                    auth.toByteArray(),
-                    android.util.Base64.NO_WRAP
+                val encoded = Base64.encodeToString(auth.toByteArray(), Base64.NO_WRAP)
+
+                val headers = mapOf("Authorization" to "Basic $encoded")
+
+                performRequest(
+                    url = url,
+                    method = "GET",
+                    headers = headers,
+                    connectTimeout = 5000,
+                    readTimeout = 5000,
+                    expectCodeRange = 200..200,
+                    parse = { json.decodeFromString<UserDto>(it) }
                 )
-
-                conn.apply {
-                    requestMethod = "GET"
-                    setRequestProperty("Authorization", "Basic $encoded")
-                    setRequestProperty("Accept", "application/json")
-                    connectTimeout = 5000
-                    readTimeout = 5000
-                }
-
-                val code = conn.responseCode
-                val text = if (code in 200..299) {
-                    conn.inputStream.bufferedReader().use { it.readText() }
-                } else {
-                    conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
-                }
-                conn.disconnect()
-
-                if (code != 200) error("HTTP $code: $text")
-
-                json.decodeFromString<UserDto>(text)
             }
         }
 
     open suspend fun getUserByUsername(username: String): Result<UserDto> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val url = URL(Network.HOST + "/api/persons/username/$username")
-                val conn = url.openConnection() as HttpURLConnection
+                val encodedName = URLEncoder.encode(username, "UTF-8")
+                val url = URL(Network.HOST + "/api/persons/username/$encodedName")
 
-                conn.apply {
-                    requestMethod = "GET"
-                    setRequestProperty("Accept", "application/json")
-                    connectTimeout = 5000
-                    readTimeout = 5000
-                }
-
-                val code = conn.responseCode
-                val text = if (code in 200..299) {
-                    conn.inputStream.bufferedReader().use { it.readText() }
-                } else {
-                    conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
-                }
-                conn.disconnect()
-
-                if (code != 200) error("HTTP $code: $text")
-
-                json.decodeFromString<UserDto>(text)
+                performRequest(
+                    url = url,
+                    method = "GET",
+                    connectTimeout = 5000,
+                    readTimeout = 5000,
+                    expectCodeRange = 200..200,
+                    parse = { json.decodeFromString<UserDto>(it) }
+                )
             }
         }
 
     open suspend fun getAllUsers(): Result<List<UserDto>> = withContext(Dispatchers.IO) {
         runCatching {
             val url = URL(Network.HOST + "/api/person")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                setRequestProperty("Accept", "application/json")
-                connectTimeout = 15000
-                readTimeout = 15000
-            }
 
-            val code = conn.responseCode
-            val text = conn.inputStream.bufferedReader().use { it.readText() }
-            conn.disconnect()
-
-            if (code !in 200..299) error("Status: $code, body: $text")
-
-            json.decodeFromString<List<UserDto>>(text)
+            performRequest(
+                url = url,
+                method = "GET",
+                connectTimeout = 15000,
+                readTimeout = 15000,
+                parse = { json.decodeFromString<List<UserDto>>(it) }
+            )
         }
     }
 
     open suspend fun getUserById(id: Long): Result<UserDto> = withContext(Dispatchers.IO) {
         runCatching {
             val url = URL(Network.HOST + "/api/person/" + id)
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                setRequestProperty("Accept", "application/json")
-                connectTimeout = 15000
-                readTimeout = 15000
-            }
 
-            val code = conn.responseCode
-            val text = conn.inputStream.bufferedReader().use { it.readText() }
-            conn.disconnect()
-
-            if (code !in 200..299) error("Status: $code, body: $text")
-
-            json.decodeFromString<UserDto>(text)
+            performRequest(
+                url = url,
+                method = "GET",
+                connectTimeout = 15000,
+                readTimeout = 15000,
+                parse = { json.decodeFromString<UserDto>(it) }
+            )
         }
     }
 
     open suspend fun registerUser(user: UserDto): Result<UserDto> = withContext(Dispatchers.IO) {
         runCatching {
             val url = URL(Network.HOST + "/api/person/register")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                setRequestProperty("Accept", "application/json")
-                connectTimeout = 15000
-                readTimeout = 15000
-            }
-
             val body = json.encodeToString(user)
-            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
 
-            val code = conn.responseCode
-            val text = conn.inputStream.bufferedReader().use { it.readText() }
-            conn.disconnect()
-
-            if (code !in 200..299) error("Status: $code, body: $text")
-
-            json.decodeFromString<UserDto>(text)
+            performRequest(
+                url = url,
+                method = "POST",
+                body = body,
+                connectTimeout = 15000,
+                readTimeout = 15000,
+                parse = { json.decodeFromString<UserDto>(it) }
+            )
         }
     }
 
@@ -156,120 +170,81 @@ open class UserInfoDataSource {
         withContext(Dispatchers.IO) {
             runCatching {
                 val url = URL(Network.HOST + "/api/person/" + id)
-                val conn = (url.openConnection() as HttpURLConnection).apply {
-                    requestMethod = "PUT"
-                    doOutput = true
-                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                    setRequestProperty("Accept", "application/json")
-                    connectTimeout = 15000
-                    readTimeout = 15000
-                }
-
                 val body = json.encodeToString(user)
-                conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
 
-                val code = conn.responseCode
-                val text = conn.inputStream.bufferedReader().use { it.readText() }
-                conn.disconnect()
-
-                if (code !in 200..299) error("Status: $code, body: $text")
-
-                json.decodeFromString<UserDto>(text)
+                performRequest(
+                    url = url,
+                    method = "PUT",
+                    body = body,
+                    connectTimeout = 15000,
+                    readTimeout = 15000,
+                    parse = { json.decodeFromString<UserDto>(it) }
+                )
             }
         }
 
     open suspend fun deleteUser(id: Long): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val url = URL(Network.HOST + "/api/person/" + id)
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "DELETE"
-                setRequestProperty("Accept", "application/json")
-                connectTimeout = 15000
-                readTimeout = 15000
-            }
 
-            val code = conn.responseCode
-            val text = conn.inputStream.bufferedReader().use { it.readText() }
-            conn.disconnect()
-
-            if (code !in 200..299) error("Status: $code, body: $text")
-
-            Unit
+            performRequest(
+                url = url,
+                method = "DELETE",
+                connectTimeout = 15000,
+                readTimeout = 15000,
+                parse = { }
+            )
         }
     }
 
     open suspend fun getAllMeetings(): Result<List<MeetingDto>> = withContext(Dispatchers.IO) {
         runCatching {
             val url = URL(Network.HOST + "/api/meetings")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                setRequestProperty("Accept", "application/json")
-                connectTimeout = 15000
-                readTimeout = 15000
-            }
 
-            val code = conn.responseCode
-            val text = conn.inputStream.bufferedReader().use { it.readText() }
-            conn.disconnect()
-
-            if (code !in 200..299) error("Status: $code, body: $text")
-
-            json.decodeFromString<List<MeetingDto>>(text)
+            performRequest(
+                url = url,
+                method = "GET",
+                connectTimeout = 15000,
+                readTimeout = 15000,
+                parse = { json.decodeFromString<List<MeetingDto>>(it) }
+            )
         }
     }
 
     open suspend fun getMeetingsByDate(date: String): Result<List<MeetingDto>> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val url = URL(Network.HOST + "/api/meetings?date=$date")
-                val conn = (url.openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    setRequestProperty("Accept", "application/json")
-                    connectTimeout = 15000
-                    readTimeout = 15000
-                }
+                val encoded = URLEncoder.encode(date, "UTF-8")
+                val url = URL(Network.HOST + "/api/meetings?date=$encoded")
 
-                val code = conn.responseCode
-                val text = conn.inputStream.bufferedReader().use { it.readText() }
-                conn.disconnect()
-
-                if (code !in 200..299) error("Status: $code, body: $text")
-
-                json.decodeFromString<List<MeetingDto>>(text)
+                performRequest(
+                    url = url,
+                    method = "GET",
+                    connectTimeout = 15000,
+                    readTimeout = 15000,
+                    parse = { json.decodeFromString<List<MeetingDto>>(it) }
+                )
             }
         }
 
     open suspend fun getInvitationsByPersonId(id: Long): Result<List<InvitationDto>> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val url = URL(Network.HOST + "/api/invitations/person/$id")
-                val conn = url.openConnection() as HttpURLConnection
+                val url = URL(Network.HOST + "/api/invitations/person/" + id)
 
                 val auth = "${CredentialsHolder.username}:${CredentialsHolder.password}"
-                val encoded = Base64.encodeToString(
-                    auth.toByteArray(),
-                    Base64.NO_WRAP
+                val encoded = Base64.encodeToString(auth.toByteArray(), Base64.NO_WRAP)
+                val headers = mapOf("Authorization" to "Basic $encoded")
+
+                performRequest(
+                    url = url,
+                    method = "GET",
+                    headers = headers,
+                    connectTimeout = 5000,
+                    readTimeout = 5000,
+                    expectCodeRange = 200..200,
+                    parse = { json.decodeFromString<List<InvitationDto>>(it) }
                 )
-                conn.setRequestProperty("Authorization", "Basic $encoded")
-
-                conn.apply {
-                    requestMethod = "GET"
-                    setRequestProperty("Accept", "application/json")
-                    connectTimeout = 5000
-                    readTimeout = 5000
-                }
-
-                val code = conn.responseCode
-                val text = if (code in 200..299) {
-                    conn.inputStream.bufferedReader().use { it.readText() }
-                } else {
-                    conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
-                }
-                conn.disconnect()
-
-                if (code != 200) error("HTTP $code: $text")
-
-                json.decodeFromString<List<InvitationDto>>(text)
             }
         }
 }
